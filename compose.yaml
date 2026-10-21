@@ -1,0 +1,38 @@
+# Local development infrastructure only. Ports are bound to loopback and auth is intentionally disabled.
+services:
+  mongo:
+    image: mongo:8.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports: ["127.0.0.1:27018:27017"]
+    volumes: ["mongo-data:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary ? quit(0) : quit(1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  mongo-init:
+    image: mongo:8.0
+    depends_on:
+      mongo:
+        condition: service_started
+    entrypoint: ["bash", "-c"]
+    command:
+      - >-
+        until mongosh --host mongo --quiet --eval 'db.adminCommand({ping:1}).ok'; do sleep 2; done;
+        mongosh --host mongo --quiet --eval 'try { rs.status() } catch(e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]}) }'
+    restart: "no"
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    profiles: ["scale"]
+    ports: ["127.0.0.1:6381:6379"]
+    volumes: ["redis-data:/data"]
+  clamav:
+    image: clamav/clamav:stable
+    profiles: ["scan"]
+    ports: ["127.0.0.1:3310:3310"]
+    volumes: ["clamav-data:/var/lib/clamav"]
+volumes:
+  mongo-data:
+  redis-data:
+  clamav-data:

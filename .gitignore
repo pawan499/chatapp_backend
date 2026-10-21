@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+!.env.test.example
+.data/
+mail/
+*.log
+credentials*.json
+
+*.pem
+*.key
+*service-account*.json
+*credentials*.json
+secrets/

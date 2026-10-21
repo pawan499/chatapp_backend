@@ -1,0 +1,16 @@
+node_modules
+dist
+.env
+.env.*
+.data
+mail
+coverage
+.git
+tests
+*.log
+**/*credentials*.json
+
+*.pem
+*.key
+**/*service-account*.json
+secrets
