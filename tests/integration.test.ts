@@ -459,6 +459,40 @@ describe("conversation and message consistency", () => {
       .expect(200);
     expect(result.body.items[0].status).toBe("read");
   });
+  it("publishes delivery and read ticks while mail is queued", async () => {
+    const c = await direct();
+    await drain();
+    const sender = await socket(alice);
+    const receiver = await socket(bob);
+    const queuedMail = await models.Job.create({
+      kind: "mail",
+      resourceId: randomUUID(),
+    });
+    const received = new Promise<any>((resolve) =>
+      receiver.once("message:upsert", resolve),
+    );
+    const m = await message(c.id);
+    await jobs.runOneJob(runtime.io, ["message"]);
+    expect((await received).id).toBe(m.id);
+    expect((await models.Job.findById(queuedMail.id).lean())?.attempts).toBe(0);
+    for (const kind of ["delivered", "read"] as const) {
+      const update = new Promise<any>((resolve) => {
+        const listener = (row: any) => {
+          if (row.id === m.id && row.status === kind) {
+            sender.off("message:upsert", listener);
+            resolve(row);
+          }
+        };
+        sender.on("message:upsert", listener);
+      });
+      await emit(receiver, `message:${kind}`, {
+        conversationId: c.id,
+        messageId: m.id,
+      });
+      expect(await jobs.runOneJob(runtime.io, ["receipt"])).toBe(true);
+      expect((await update).status).toBe(kind);
+    }
+  });
   it("keeps unread cursors monotonic and excludes own or deleted messages", async () => {
     const c = await direct(),
       one = await message(c.id),

@@ -37,20 +37,32 @@ async function publish(io: Server, ids: string[], cid: string) {
       s.data.auth as { userId: string; sessionId: string },
     ]),
   );
-  for (const auth of unique.values()) {
-    if (
-      !(await Session.exists({
-        _id: auth.sessionId,
-        userId: auth.userId,
-        revokedAt: null,
-        expiresAt: { $gt: new Date() },
-      })) ||
-      !(await Membership.exists({ conversationId: cid, userId: auth.userId }))
-    )
-      continue;
-    const messages = await serializeMessages(ids, auth.userId, auth.sessionId);
-    for (const message of messages)
-      io.to(`session:${auth.sessionId}`).emit("message:upsert", message);
+  const sessions = [...unique.values()];
+  for (let offset = 0; offset < sessions.length; offset += 8) {
+    await Promise.all(
+      sessions.slice(offset, offset + 8).map(async (auth) => {
+        if (
+          !(await Session.exists({
+            _id: auth.sessionId,
+            userId: auth.userId,
+            revokedAt: null,
+            expiresAt: { $gt: new Date() },
+          })) ||
+          !(await Membership.exists({
+            conversationId: cid,
+            userId: auth.userId,
+          }))
+        )
+          return;
+        const messages = await serializeMessages(
+          ids,
+          auth.userId,
+          auth.sessionId,
+        );
+        for (const message of messages)
+          io.to(`session:${auth.sessionId}`).emit("message:upsert", message);
+      }),
+    );
   }
 }
 async function invalidation(io: Server, cid: string) {
@@ -204,7 +216,7 @@ export async function handleJob(job: JobDoc, io?: Server) {
   } else if (job.kind === "account_cleanup")
     await cleanupAccount(job.resourceId);
 }
-export async function runOneJob(io?: Server) {
+export async function runOneJob(io?: Server, selectedKinds?: JobDoc["kind"][]) {
   const kinds: JobDoc["kind"][] = io
     ? [
         "message",
@@ -222,7 +234,7 @@ export async function runOneJob(io?: Server) {
     lease = new Date(Date.now() + 60000);
   const job = await Job.findOneAndUpdate(
     {
-      kind: { $in: kinds },
+      kind: { $in: selectedKinds ?? kinds },
       doneAt: null,
       dead: false,
       availableAt: { $lte: now },
@@ -326,16 +338,23 @@ export async function cleanupUploads() {
 }
 export function startJobs(io?: Server) {
   let stop = false;
-  const loop = (async () => {
-    let nextCleanup = Date.now() + 60000;
+  const realtime: JobDoc["kind"][] = [
+    "message",
+    "receipt",
+    "conversation",
+    "membership",
+    "revoke",
+  ];
+  const background: JobDoc["kind"][] = [
+    "notify",
+    "push",
+    "account_cleanup",
+    "mail",
+  ];
+  const poll = async (kinds: JobDoc["kind"][]) => {
     while (!stop) {
       try {
-        if (!(await runOneJob(io))) await delay(250);
-        if (Date.now() > nextCleanup) {
-          await cleanupEmptyConversations();
-          await cleanupUploads();
-          nextCleanup = Date.now() + 60000;
-        }
+        if (!(await runOneJob(io, kinds))) await delay(100);
       } catch {
         logger.error(
           { event: "job_poll_failure" },
@@ -344,10 +363,32 @@ export function startJobs(io?: Server) {
         await delay(1000);
       }
     }
-  })();
+  };
+  // Slow SMTP, push and maintenance work must not hold up message delivery.
+  const loops = [poll(background)];
+  if (io) loops.push(poll(realtime), poll(realtime));
+  loops.push(
+    (async () => {
+      let nextCleanup = Date.now() + 60000;
+      while (!stop) {
+        await delay(250);
+        if (stop || Date.now() < nextCleanup) continue;
+        try {
+          await cleanupEmptyConversations();
+          await cleanupUploads();
+        } catch {
+          logger.error(
+            { event: "cleanup_failure" },
+            "Background cleanup will retry",
+          );
+        }
+        nextCleanup = Date.now() + 60000;
+      }
+    })(),
+  );
   return async () => {
     stop = true;
-    await loop;
+    await Promise.all(loops);
   };
 }
 
